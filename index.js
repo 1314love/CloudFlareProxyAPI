@@ -1,32 +1,23 @@
 /**
- * Proxy Everything API v7.0 - Clean Architecture
- * 基于 Cloudflare Workers 的多协议智能代理
+ * CloudFlareProxyAPI v7.0
+ * URL 路径式多协议代理转发器
  *
- * Design Principles:
- * - Single Responsibility (单一职责)
- * - Open/Closed (开闭原则)
- * - Dependency Inversion (依赖倒置)
- * - Interface Segregation (接口隔离)
- * - Least Knowledge (迪米特法则)
- *
- * Architecture:
- * - Strategy Pattern (策略模式) - 多协议处理
- * - Pipeline Pattern (管道模式) - 请求处理流
- * - Factory Pattern (工厂模式) - 响应/错误创建
+ * 运行平台：Cloudflare Workers
+ * 支持协议：HTTP, HTTPS, WebSocket
  *
  * Compatibility Date: 2025-04-01
  * Compatibility Flags: nodejs_compat
  */
 
 // ============================================================================
-// 配置层（Configuration Layer）
+// 配置常量
 // ============================================================================
 
 const CONFIG = Object.freeze({
-  // 超时设置
+  // 超时时间（毫秒）
   TIMEOUT_MS: 30_000,
 
-  // 协议配置
+  // 支持的协议
   PROTOCOLS: {
     HTTP: 'http:',
     HTTPS: 'https:',
@@ -34,7 +25,7 @@ const CONFIG = Object.freeze({
     WSS: 'wss:'
   },
 
-  // 安全配置
+  // 安全规则
   SECURITY: {
     BLOCKED_IP_PATTERNS: [
       /^127\./, /^0\.0\.0\.0$/, /^10\./,
@@ -50,7 +41,7 @@ const CONFIG = Object.freeze({
     BLOCKED_HEADER_PREFIXES: ['cf-', 'x-forwarded-']
   },
 
-  // 正则表达式（预编译）
+  // 预编译正则表达式
   REGEX: {
     PROTOCOL: /^https?:\/\//i,
     WEBSOCKET_PROTOCOL: /^wss?:\/\//i,
@@ -72,7 +63,7 @@ const CONFIG = Object.freeze({
 });
 
 // ============================================================================
-// 工具层（Utility Layer）
+// 工具函数
 // ============================================================================
 
 /**
@@ -121,15 +112,17 @@ class PerformanceTimer {
 }
 
 // ============================================================================
-// 领域层（Domain Layer）- 核心业务逻辑
+// URL 处理函数
 // ============================================================================
 
 /**
- * URL 处理器（负责 URL 解析、标准化、验证）
+ * URL 处理 - 解析、标准化、验证
  */
 class UrlHandler {
   /**
    * 解码 URL 路径
+   * @param {string} pathname - URL 路径名
+   * @returns {string} 解码后的路径
    */
   static decodePath(pathname) {
     try {
@@ -141,6 +134,8 @@ class UrlHandler {
 
   /**
    * 检测协议类型
+   * @param {string} urlStr - URL 字符串
+   * @returns {{type: string, protocol: string}} 协议信息
    */
   static detectProtocol(urlStr) {
     if (CONFIG.REGEX.WEBSOCKET_PROTOCOL.test(urlStr)) {
@@ -154,6 +149,9 @@ class UrlHandler {
 
   /**
    * 标准化 URL
+   * @param {string} urlStr - URL 字符串
+   * @param {string} defaultProtocol - 默认协议
+   * @returns {string} 标准化后的 URL
    */
   static normalize(urlStr, defaultProtocol = 'https:') {
     const normalized = urlStr.replace(CONFIG.REGEX.SLASHES, '');
@@ -162,13 +160,16 @@ class UrlHandler {
       return normalized;
     }
 
-    // 智能协议选择
+    // 自动选择协议
     const protocol = this.selectProtocol(normalized, defaultProtocol);
     return `${protocol}//${normalized}`;
   }
 
   /**
-   * 选择协议
+   * 根据域名或端口选择协议
+   * @param {string} urlStr - URL 字符串
+   * @param {string} defaultProtocol - 默认协议
+   * @returns {string} 协议
    */
   static selectProtocol(urlStr, defaultProtocol) {
     if (CONFIG.REGEX.IP_ADDRESS.test(urlStr)) return 'http:';
@@ -185,12 +186,14 @@ class UrlHandler {
 
   /**
    * 验证 URL（SSRF 防护）
+   * @param {string} urlString - URL 字符串
+   * @returns {{valid: boolean, error?: string}} 验证结果
    */
   static validate(urlString) {
     try {
       const url = new URL(urlString);
 
-      // 协议白名单
+      // 检查协议白名单
       if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)) {
         return { valid: false, error: '不支持的协议' };
       }
@@ -202,14 +205,14 @@ class UrlHandler {
         return { valid: false, error: '不允许访问 localhost' };
       }
 
-      // 阻止内网 IP（使用二分查找优化）
+      // 检查内网 IP
       for (const pattern of CONFIG.SECURITY.BLOCKED_IP_PATTERNS) {
         if (pattern.test(hostname)) {
           return { valid: false, error: '不允许访问内网地址' };
         }
       }
 
-      // IPv6 特殊检查
+      // IPv6 地址检查
       if (hostname.startsWith('[')) {
         const ipv6 = hostname.replace(/\[\]/g, '');
         if (ipv6 === '::1' || ipv6.toLowerCase().startsWith('fc') || ipv6.toLowerCase().startsWith('fe80')) {
@@ -225,11 +228,14 @@ class UrlHandler {
 }
 
 /**
- * 请求头处理器
+ * 请求头处理 - Cookie 清理、头部过滤
  */
 class HeaderHandler {
   /**
    * 构建代理请求头
+   * @param {Headers} originalHeaders - 原始请求头
+   * @param {URL} clientUrl - 客户端 URL
+   * @returns {Headers} 新的请求头
    */
   static buildProxyHeaders(originalHeaders, clientUrl) {
     const newHeaders = new Headers();
@@ -255,7 +261,9 @@ class HeaderHandler {
   }
 
   /**
-   * 清理 Cookie
+   * 清理 Cookie（过滤 Cloudflare 相关 Cookie）
+   * @param {string} cookieString - Cookie 字符串
+   * @returns {string|null} 清理后的 Cookie
    */
   static cleanCookie(cookieString) {
     if (!cookieString) return null;
@@ -279,6 +287,8 @@ class HeaderHandler {
 
   /**
    * 检查 Cookie 是否被阻止
+   * @param {string} name - Cookie 名称
+   * @returns {boolean} 是否被阻止
    */
   static isBlockedCookie(name) {
     const lowerName = name.toLowerCase();
@@ -288,6 +298,8 @@ class HeaderHandler {
 
   /**
    * 检查请求头是否被阻止
+   * @param {string} name - 请求头名称
+   * @returns {boolean} 是否被阻止
    */
   static shouldBlockHeader(name) {
     return CONFIG.SECURITY.BLOCKED_HEADERS.has(name) ||
@@ -295,7 +307,10 @@ class HeaderHandler {
   }
 
   /**
-   * 添加转发头部
+   * 添加转发信息头部
+   * @param {Headers} headers - 请求头对象
+   * @param {Headers} originalHeaders - 原始请求头
+   * @param {URL} clientUrl - 客户端 URL
    */
   static addForwardingHeaders(headers, originalHeaders, clientUrl) {
     const clientIP = originalHeaders.get('CF-Connecting-IP');
@@ -306,11 +321,15 @@ class HeaderHandler {
 }
 
 /**
- * HTML 重写器
+ * HTML 内容重写 - 修正相对路径
  */
 class HtmlRewriter {
   /**
-   * 重写 HTML 内容
+   * 重写 HTML 中的相对路径
+   * @param {string} html - HTML 内容
+   * @param {string} targetUrl - 目标 URL
+   * @param {URL} clientUrl - 客户端 URL
+   * @returns {string} 重写后的 HTML
    */
   static rewrite(html, targetUrl, clientUrl) {
     try {
@@ -330,16 +349,16 @@ class HtmlRewriter {
 }
 
 // ============================================================================
-// 策略层（Strategy Layer）- 多协议处理策略
+// 协议处理器
 // ============================================================================
 
 /**
- * 协议处理器策略接口
+ * 协议处理器基类
  */
 class ProtocolStrategy {
   /**
    * 判断是否可以处理该协议
-   * @param {Object} protocolInfo - 协议信息
+   * @param {{type: string, protocol: string}} protocolInfo - 协议信息
    * @returns {boolean} 是否可以处理
    */
   canHandle(protocolInfo) {
@@ -359,7 +378,7 @@ class ProtocolStrategy {
 }
 
 /**
- * HTTP/HTTPS 协议处理器
+ * HTTP/HTTPS协议处理器
  */
 class HttpStrategy extends ProtocolStrategy {
   canHandle(protocolInfo) {
@@ -370,7 +389,7 @@ class HttpStrategy extends ProtocolStrategy {
    * HTTP 请求处理
    * @param {Request} request - 请求对象
    * @param {string} targetUrl - 目标 URL
-   * @param {Object} context - 上下文对象
+   * @param {{timer: PerformanceTimer, requestId: string, clientUrl: URL}} context - 上下文对象
    * @returns {Promise<Response>} 响应对象
    */
   async handle(request, targetUrl, context) {
@@ -392,7 +411,10 @@ class HttpStrategy extends ProtocolStrategy {
   }
 
   /**
-   * 带超时的 Fetch
+   * 带超时的 Fetch 请求
+   * @param {Request} request - 请求对象
+   * @param {number} timeout - 超时时间（毫秒）
+   * @returns {Promise<Response>} 响应对象
    */
   async fetchWithTimeout(request, timeout) {
     const controller = new AbortController();
@@ -412,15 +434,19 @@ class HttpStrategy extends ProtocolStrategy {
   }
 
   /**
-   * 处理响应
+   * 处理响应（重定向、HTML 重写等）
+   * @param {Response} response - 响应对象
+   * @param {string} targetUrl - 目标 URL
+   * @param {{timer: PerformanceTimer, requestId: string, clientUrl: URL}} context - 上下文对象
+   * @returns {Response|Promise<Response>} 响应对象
    */
   processResponse(response, targetUrl, context) {
-    // 处理重定向
+    // 处理 HTTP 重定向
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       return this.handleRedirect(response, targetUrl);
     }
 
-    // 处理 HTML
+    // 处理 HTML 内容（重写相对路径）
     const contentType = response.headers.get('Content-Type') || '';
     if (contentType.includes('text/html')) {
       return this.handleHtmlResponse(response, targetUrl, context);
@@ -431,7 +457,10 @@ class HttpStrategy extends ProtocolStrategy {
   }
 
   /**
-   * 处理重定向
+   * 处理 HTTP 重定向响应
+   * @param {Response} response - 响应对象
+   * @param {string} targetUrl - 目标 URL
+   * @returns {Response} 重定向响应
    */
   handleRedirect(response, targetUrl) {
     const location = response.headers.get('location');
@@ -456,7 +485,11 @@ class HttpStrategy extends ProtocolStrategy {
   }
 
   /**
-   * 处理 HTML 响应
+   * 处理 HTML 响应并重写相对路径
+   * @param {Response} response - 响应对象
+   * @param {string} targetUrl - 目标 URL
+   * @param {{timer: PerformanceTimer, requestId: string, clientUrl: URL}} context - 上下文对象
+   * @returns {Promise<Response>} 响应对象
    */
   handleHtmlResponse(response, targetUrl, context) {
     return response.text().then(html => {
@@ -466,7 +499,11 @@ class HttpStrategy extends ProtocolStrategy {
   }
 
   /**
-   * 创建响应
+   * 创建标准响应
+   * @param {Response} response - 原始响应
+   * @param {{timer: PerformanceTimer, requestId: string, clientUrl: URL}} context - 上下文对象
+   * @param {string} [body] - 响应体（可选，用于重写后的 HTML）
+   * @returns {Response} 新响应
    */
   createResponse(response, context, body) {
     const newResponse = new Response(body !== undefined ? body : response.body, {
@@ -482,7 +519,8 @@ class HttpStrategy extends ProtocolStrategy {
   }
 
   /**
-   * 添加标准头部
+   * 添加标准响应头（CORS、缓存控制等）
+   * @param {Headers} headers - 响应头对象
    */
   addStandardHeaders(headers) {
     headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -496,7 +534,9 @@ class HttpStrategy extends ProtocolStrategy {
   }
 
   /**
-   * 添加性能头部
+   * 添加性能监控信息到响应头
+   * @param {Headers} headers - 响应头对象
+   * @param {{timer: PerformanceTimer, requestId: string, clientUrl: URL}} context - 上下文对象
    */
   addPerformanceHeaders(headers, context) {
     headers.set('X-Proxy-Request-ID', context.requestId);
@@ -506,13 +546,20 @@ class HttpStrategy extends ProtocolStrategy {
 }
 
 /**
- * WebSocket 协议处理器
+ * WebSocket协议处理器
  */
 class WebSocketStrategy extends ProtocolStrategy {
   canHandle(protocolInfo) {
     return protocolInfo.type === 'websocket';
   }
 
+  /**
+   * 处理 WebSocket 连接请求
+   * @param {Request} request - 请求对象
+   * @param {string} targetWsUrl - 目标 WebSocket URL
+   * @param {{timer: PerformanceTimer, requestId: string, clientUrl: URL}} context - 上下文对象
+   * @returns {Promise<Response>} WebSocket 响应
+   */
   async handle(request, targetWsUrl, context) {
     try {
       // 连接到目标 WebSocket 服务器
@@ -547,7 +594,10 @@ class WebSocketStrategy extends ProtocolStrategy {
   }
 
   /**
-   * 桥接 WebSocket
+   * 桥接客户端和服务端 WebSocket
+   * @param {WebSocket} client - 客户端 WebSocket
+   * @param {WebSocket} server - 服务端 WebSocket
+   * @param {string} requestId - 请求 ID（用于日志）
    */
   bridgeWebSockets(client, server, requestId) {
     // Client -> Server
@@ -584,11 +634,11 @@ class WebSocketStrategy extends ProtocolStrategy {
 }
 
 // ============================================================================
-// 应用层（Application Layer）- 编排和协调
+// 请求处理主逻辑
 // ============================================================================
 
 /**
- * 请求处理器（主入口）
+ * 请求处理器 - 主入口
  */
 class RequestHandler {
   constructor() {
@@ -600,7 +650,9 @@ class RequestHandler {
   }
 
   /**
-   * 处理请求
+   * 处理 HTTP/HTTPS 请求
+   * @param {Request} request - 请求对象
+   * @returns {Promise<Response>} 响应对象
    */
   async handleRequest(request) {
     const timer = new PerformanceTimer();
@@ -620,7 +672,7 @@ class RequestHandler {
       const protocolInfo = UrlHandler.detectProtocol(encodedTarget);
       const targetUrl = UrlHandler.normalize(encodedTarget, context.clientUrl.protocol);
 
-      // 4. 验证 URL
+      // 4. 验证 URL（SSRF 防护）
       const validation = UrlHandler.validate(targetUrl);
       if (!validation.valid) {
         return ResponseFactory.error('INVALID_TARGET', validation.error, 400, timer, requestId, { url: targetUrl });
@@ -636,7 +688,9 @@ class RequestHandler {
   }
 
   /**
-   * 选择策略
+   * 根据协议类型选择处理器
+   * @param {{type: string, protocol: string}} protocolInfo - 协议信息
+   * @returns {ProtocolStrategy} 协议处理器
    */
   selectStrategy(protocolInfo) {
     const strategy = this.strategies.find(s => s.canHandle(protocolInfo));
@@ -647,7 +701,9 @@ class RequestHandler {
   }
 
   /**
-   * 处理 WebSocket 事件
+   * 处理 WebSocket 连接事件
+   * @param {Object} event - WebSocket 事件
+   * @returns {Response} WebSocket 响应
    */
   handleWebSocket(event) {
     const { webSocket } = event;
@@ -666,37 +722,39 @@ class RequestHandler {
 }
 
 /**
- * 响应工厂
+ * 响应工厂 - 创建标准响应和错误响应
  */
 const ResponseFactory = {
+  /**
+   * 创建 API 信息响应
+   * @param {PerformanceTimer} timer - 性能计时器
+   * @param {string} requestId - 请求 ID
+   * @returns {Response} JSON 响应
+   */
   apiInfo(timer, requestId) {
     const data = {
-      name: 'Proxy Everything API',
-      version: '7.0.0-clean-architecture',
-      description: '基于清洁架构的多协议智能代理',
+      name: 'CloudFlareProxyAPI',
+      version: '7.0.0',
+      description: 'URL-based multi-protocol proxy forwarder',
       protocols: {
-        http: '✅ HTTP/HTTPS',
-        websocket: '✅ WebSocket',
-        http3: 'ℹ️ Via Cloudflare',
-        tcp: '✅ TCP (outbound)',
-        grpc: '✅ Via HTTP/2',
-        mqtt: '✅ Via WebSocket'
+        http: 'HTTP/HTTPS',
+        websocket: 'WebSocket'
       },
       usage: {
-        format: '/<target_url>',
+        format: '/<encoded_target_url>',
         examples: [
-          '/https://example.com',
-          '/wss://echo.websocket.org',
-          '/api.github.com/users/octocat'
+          '/api.github.com/users/octocat',
+          '/https://example.com/path',
+          '/ws/wss://echo.websocket.org'
         ]
       },
       features: [
-        '智能协议识别',
-        'SSRF 防护',
-        'Cookie 安全转发',
-        'HTML 路径重写',
-        'WebSocket 双向通信',
-        '性能监控'
+        'Automatic protocol detection',
+        'SSRF protection',
+        'Cookie filtering',
+        'HTML path rewriting',
+        'WebSocket bridging',
+        'Performance monitoring'
       ]
     };
 
@@ -709,6 +767,16 @@ const ResponseFactory = {
     return response;
   },
 
+  /**
+   * 创建错误响应
+   * @param {string} code - 错误代码
+   * @param {string} message - 错误消息
+   * @param {number} status - HTTP 状态码
+   * @param {PerformanceTimer} timer - 性能计时器
+   * @param {string} requestId - 请求 ID
+   * @param {Object} [details={}] - 其他详情
+   * @returns {Response} JSON 错误响应
+   */
   error(code, message, status, timer, requestId, details = {}) {
     const data = {
       error: {
@@ -728,6 +796,12 @@ const ResponseFactory = {
     return response;
   },
 
+  /**
+   * 添加性能监控信息到响应头
+   * @param {Headers} headers - 响应头对象
+   * @param {PerformanceTimer} timer - 性能计时器
+   * @param {string} requestId - 请求 ID
+   */
   addPerformanceHeaders(headers, timer, requestId) {
     headers.set('X-Proxy-Request-ID', requestId);
     headers.set('X-Proxy-Duration', `${timer.elapsed()}ms`);
@@ -736,11 +810,19 @@ const ResponseFactory = {
 };
 
 /**
- * 错误处理器
+ * 错误处理器 - 统一处理异常
  */
 const ErrorHandler = {
+  /**
+   * 处理异常并返回错误响应
+   * @param {Error} error  - 异常对象
+   * @param {string} requestId - 请求 ID
+   * @param {PerformanceTimer} timer - 性能计时器
+   * @returns {Response} 错误响应
+   */
   handle(error, requestId, timer) {
     try {
+      // 判断错误类型
       const errorCode = error.message.includes('超时') ? 'TIMEOUT' : 'PROXY_ERROR';
       const statusMap = {
         'INVALID_TARGET': 400,
@@ -773,15 +855,18 @@ const ErrorHandler = {
 };
 
 // ============================================================================
-// 入口点（Entry Point）
+// 入口点 - Cloudflare Workers 事件监听
 // ============================================================================
 
+// 创建请求处理器实例
 const handler = new RequestHandler();
 
+// HTTP/HTTPS 请求处理
 addEventListener('fetch', event => {
   event.respondWith(handler.handleRequest(event.request));
 });
 
+// WebSocket 连接处理
 addEventListener('websocket', event => {
   event.respondWith(handler.handleWebSocket(event));
 });

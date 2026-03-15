@@ -1,6 +1,6 @@
 /**
  * Proxy Everything API v7.0 - Clean Architecture
- * 基于 Cloudflare Workers 的多协议智能代理（重构版）
+ * 基于 Cloudflare Workers 的多协议智能代理
  *
  * Design Principles:
  * - Single Responsibility (单一职责)
